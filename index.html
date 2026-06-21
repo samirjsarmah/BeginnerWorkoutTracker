@@ -22,6 +22,7 @@ h1{font-family:'Bebas Neue',sans-serif;font-weight:400;font-size:clamp(34px,6vw,
 .timeline-card{background:var(--surface);border:1px solid var(--hairline);border-radius:var(--radius);padding:18px 20px 16px;margin-bottom:22px;}
 .timeline-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap;}
 .timeline-label{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink-dim);letter-spacing:.05em;}
+.audio-hint{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink-faint);margin:8px 0 4px;display:flex;align-items:center;gap:6px;}
 .clock{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:var(--ink);letter-spacing:.03em;}
 .clock.running{color:var(--warm);}
 .session-controls{display:flex;gap:8px;align-items:center;}
@@ -332,10 +333,12 @@ li.item.done .item-detail{color:var(--ink-faint);}
       <p class="timeline-label">SESSION PROGRESS</p>
       <div class="session-controls">
         <span class="clock" id="clock">00:00</span>
+        <button class="btn btn-primary" id="voiceToggle">🔊 Voice: On</button>
         <button class="btn btn-primary" id="sessionToggle">Start session</button>
         <button class="btn btn-ghost" id="resetAll">Reset</button>
       </div>
     </div>
+    <p class="audio-hint">🎧 Voice coaching guides you through each exercise — pop in headphones for the best experience.</p>
     <div class="rail">
       <div class="seg" style="flex:10"><div class="seg-fill" id="fill-warm" style="background:var(--warm)"></div><span class="seg-label">WARM-UP · 10</span></div>
       <div class="seg" style="flex:14"><div class="seg-fill" id="fill-upper" style="background:var(--upper)"></div><span class="seg-label">UPPER</span></div>
@@ -454,6 +457,37 @@ const DATA = {
 const checkSvg='<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5L6.2 11.7L13 4.5" stroke="#101113" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 const ytBadge=`<span class="yt-badge"><svg viewBox="0 0 10 7" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="7" rx="1.5" fill="#FF0000"/><polygon points="4,1.5 4,5.5 7.5,3.5" fill="white"/></svg></span>`;
+
+/* ---- AUDIO / VOICE COACH ---- */
+let voiceOn=true;
+let audioCtx=null;
+function speak(text,priority){
+  if(!voiceOn || !('speechSynthesis' in window)) return;
+  if(priority) window.speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  u.rate=1.02; u.pitch=1; u.volume=1;
+  window.speechSynthesis.speak(u);
+}
+function beep(freq,duration,type,vol){
+  if(!voiceOn) return;
+  freq=freq||880; duration=duration||150; type=type||'sine'; vol=vol||0.15;
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    const osc=audioCtx.createOscillator();
+    const gain=audioCtx.createGain();
+    osc.type=type; osc.frequency.value=freq;
+    gain.gain.value=vol;
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime+duration/1000);
+  }catch(e){}
+}
+function formatSpokenTime(s){
+  if(s<60) return `${s} seconds`;
+  const m=Math.floor(s/60), rem=s%60;
+  if(rem===0) return `${m} minute${m>1?'s':''}`;
+  return `${m} minute${m>1?'s':''} ${rem} seconds`;
+}
 
 /* Bike SVG icon */
 function bikeSVG(){
@@ -578,7 +612,7 @@ function buildList(key){
       pb.className='play'; pb.textContent='▶';
       pb.addEventListener('click',e=>{
         e.stopPropagation();
-        startTimer(pb,text.querySelector('.item-detail'),item.detail,item.timer,()=>setDone(key,i,true));
+        startTimer(pb,text.querySelector('.item-detail'),item.detail,item.timer,()=>setDone(key,i,true),item.name);
       });
       li.appendChild(pb);
     }
@@ -597,6 +631,26 @@ function setDone(key,i,val){
   li.querySelector('.check').classList.toggle('checked',val);
   DATA[key].items[i]._done=val;
   refreshProgress();
+  if(val){
+    speak(`${DATA[key].items[i].name} done.`);
+    checkCategoryMilestones();
+  }
+}
+
+const milestones={warmupSaid:false,trainingSaid:false,cardioSaid:false,stretchSaid:false};
+function checkCategoryMilestones(){
+  const warmupDone=DATA.warmup.items.every(x=>x._done);
+  const trainingDone=['upper','lower','core'].every(k=>DATA[k].items.every(x=>x._done));
+  const cardioDone=DATA.cardio.items.every(x=>x._done);
+  const stretchDone=DATA.stretch.items.every(x=>x._done);
+  if(warmupDone && !milestones.warmupSaid){milestones.warmupSaid=true; speak("Warm-up complete! Time to build some strength.", true);}
+  if(trainingDone && !milestones.trainingSaid){milestones.trainingSaid=true; speak("Strength training complete! Let's get the heart rate up with some cardio.", true);}
+  if(cardioDone && !milestones.cardioSaid){milestones.cardioSaid=true; speak("Cardio complete! Finish strong with some stretching.", true);}
+  if(stretchDone && !milestones.stretchSaid){
+    milestones.stretchSaid=true;
+    speak("Awesome work! Your workout is complete. Great job today!", true);
+    beep(784,150); setTimeout(()=>beep(988,150),160); setTimeout(()=>beep(1318,320),320);
+  }
 }
 
 function refreshProgress(){
@@ -612,29 +666,72 @@ function refreshProgress(){
   });
 }
 
-function startTimer(btn,detailEl,orig,secs,onDone){
+function startTimer(btn,detailEl,orig,secs,onDone,name){
   if(btn.classList.contains('active'))return;
   let r=secs; btn.classList.add('active'); btn.textContent=r;
+  speak(`Starting ${name||'this exercise'}. ${formatSpokenTime(secs)}.`, true);
+  const half=Math.floor(secs/2);
+  let halfSaid=false;
   const t=setInterval(()=>{
     r--;
-    if(r<=0){clearInterval(t);btn.classList.remove('active');btn.textContent='▶';detailEl.textContent=orig;onDone();return;}
+    if(r===half && half>6 && !halfSaid){halfSaid=true; speak('Halfway there.');}
+    if(r<=5 && r>0){beep(700,110,'sine',0.12); speak(String(r), true);}
+    if(r<=0){
+      clearInterval(t);
+      btn.classList.remove('active');
+      btn.textContent='▶';
+      detailEl.textContent=orig;
+      beep(988,200,'sine',0.18);
+      setTimeout(()=>beep(1318,260,'sine',0.18),170);
+      speak(`Time! ${name||'Exercise'} complete. Nice work.`, true);
+      onDone();
+      return;
+    }
     btn.textContent=r; detailEl.textContent=r+'s remaining…';
   },1000);
 }
 
-let elapsed=0,running=false,tick=null;
+let elapsed=0,running=false,tick=null,sessionStartedOnce=false;
 const clockEl=document.getElementById('clock');
 const togBtn=document.getElementById('sessionToggle');
+const voiceBtn=document.getElementById('voiceToggle');
 const fmt=s=>Math.floor(s/60).toString().padStart(2,'0')+':'+(s%60).toString().padStart(2,'0');
+
+voiceBtn.addEventListener('click',()=>{
+  voiceOn=!voiceOn;
+  voiceBtn.textContent=voiceOn?'🔊 Voice: On':'🔇 Voice: Off';
+  if(!voiceOn && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+  else speak('Voice guide on.', true);
+});
+
 togBtn.addEventListener('click',()=>{
   running=!running;
-  if(running){togBtn.textContent='Pause';clockEl.classList.add('running');tick=setInterval(()=>{elapsed++;clockEl.textContent=fmt(elapsed);},1000);}
-  else{togBtn.textContent='Start session';clockEl.classList.remove('running');clearInterval(tick);}
+  if(running){
+    togBtn.textContent='Pause';clockEl.classList.add('running');
+    if(!sessionStartedOnce){
+      sessionStartedOnce=true;
+      speak("Starting your workout. Ten minutes of warm-up, thirty-five minutes of strength training, ten minutes of cardio, and five minutes of stretching. Grab your headphones, let's go!", true);
+    } else {
+      speak('Resuming.', true);
+    }
+    tick=setInterval(()=>{
+      elapsed++;
+      clockEl.textContent=fmt(elapsed);
+      if(elapsed>0 && elapsed%300===0){speak(`${elapsed/60} minutes in. Keep going!`);}
+    },1000);
+  }
+  else{
+    togBtn.textContent='Start session';clockEl.classList.remove('running');clearInterval(tick);
+    speak('Session paused.', true);
+  }
 });
 document.getElementById('resetAll').addEventListener('click',()=>{
   Object.keys(DATA).forEach(k=>DATA[k].items.forEach((_,i)=>setDone(k,i,false)));
   elapsed=0;running=false;clearInterval(tick);
   clockEl.textContent='00:00';clockEl.classList.remove('running');togBtn.textContent='Start session';
+  Object.keys(milestones).forEach(k=>milestones[k]=false);
+  sessionStartedOnce=false;
+  if('speechSynthesis' in window) window.speechSynthesis.cancel();
 });
 
 refreshProgress();
